@@ -1,18 +1,24 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
-	"net/http"
 	"os"
 	"strings"
 
-	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/mark3labs/mcp-go/client"
+	"github.com/mark3labs/mcp-go/client/transport"
+	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/mark3labs/mcp-go/server"
+
 	"github.com/rs/zerolog"
+)
+
+var (
+	log zerolog.Logger
 )
 
 func endpoint(region, tld string, local bool) string {
@@ -22,42 +28,6 @@ func endpoint(region, tld string, local bool) string {
 
 	return fmt.Sprintf("https://%s.mcp.konghq.%s/mcp", region, tld)
 }
-
-type patRoundTripper struct {
-	pat string
-}
-
-func (p *patRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
-	req.Header.Set("User-Agent", "Insomnia/12.0.0")
-	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", p.pat))
-
-	ev := log.Info().Str("method", req.Method)
-
-	for k := range req.Header {
-		ev = ev.Str(k, req.Header.Get(k))
-	}
-
-	ev.Msg("init request")
-
-	if req.Body != nil {
-		body, _ := io.ReadAll(req.Body)
-		log.Info().Str("mcp_body", string(body)).Msg("mcp contact")
-		req.Body = io.NopCloser(bytes.NewReader(body))
-	}
-
-	resp, err := http.DefaultClient.Do(req)
-	if err == nil {
-		log.Info().Int("mcp_status_code", resp.StatusCode).Msg("got response")
-	} else {
-		log.Error().Err(err).Msg("error response")
-	}
-
-	return resp, err
-}
-
-var (
-	log zerolog.Logger
-)
 
 func main() {
 	var (
@@ -72,7 +42,7 @@ func main() {
 
 	log = zerolog.New(loggingFile)
 
-	pat := strings.TrimSpace(os.Getenv("ZED_KONNECT_TOKEN"))
+	pat := strings.TrimSpace(os.Getenv("KONNECT_MCP_TOKEN"))
 	region := "us"
 	tld := "com"
 	local := false
@@ -99,66 +69,68 @@ func main() {
 		Bool("is_local", local).
 		Logger()
 
-	client := mcp.NewClient(&mcp.Implementation{
-		Name:    "konnect-mcp-stdio",
-		Title:   "Konnect MCP CLI Server relaying stdio client calls to a HTTP MCP implementation",
-		Version: "0.0.1",
-	}, nil)
-
-	httpClient := http.Client{
-		Transport: &patRoundTripper{pat},
+	httpTransport, err := transport.NewStreamableHTTP(mcpEndpoint, transport.WithHTTPHeaders(map[string]string{
+		"Authorization": "Bearer " + pat,
+	}))
+	if err != nil {
+		log.Fatal().Err(err).Msg("unable to create a HTTP transport")
 	}
+
+	client := client.NewClient(httpTransport)
+	// Set up notification handler
+	client.OnNotification(func(notification mcp.JSONRPCNotification) {
+		fmt.Printf("Received notification: %s\n", notification.Method)
+	})
 
 	log.Info().Msg("attempting to connect to mcp endpoint")
-
-	session, err := client.Connect(ctx, &mcp.StreamableClientTransport{
-		Endpoint:   mcpEndpoint,
-		HTTPClient: &httpClient,
-	}, nil)
-	if err != nil {
-		log.Fatal().Err(err).Msg("unable to connect to remote")
+	initRequest := mcp.InitializeRequest{}
+	initRequest.Params.ProtocolVersion = mcp.LATEST_PROTOCOL_VERSION
+	initRequest.Params.ClientInfo = mcp.Implementation{
+		Name:    "MCP-Go Simple Client Example",
+		Version: "1.0.0",
 	}
-	defer session.Close()
+	initRequest.Params.Capabilities = mcp.ClientCapabilities{}
+
+	serverInfo, err := client.Initialize(ctx, initRequest)
+	if err != nil {
+		log.Fatal().Err(err).Msg("failed to initialize client")
+	}
+	if serverInfo.Capabilities.Tools == nil {
+		log.Fatal().Err(errors.New("mcp server doesn't support tools")).Msg("failed to initialize client")
+	}
 
 	log.Info().Msg("connected to mcp endpoint")
-	log.Info().Msg("listing tools")
 
-	toolsResult, err := session.ListTools(ctx, nil)
+	toolsRequest := mcp.ListToolsRequest{}
+	toolsResult, err := client.ListTools(ctx, toolsRequest)
 	if err != nil {
 		log.Fatal().Err(err).Msg("failed to list tools")
 	}
 
-	log.Info().Msg("listing tools successful")
+	log.Info().Msg("listing tools")
 
-	runServer(ctx, session, toolsResult.Tools)
+	runServer(ctx, client, toolsResult.Tools)
 }
 
-func runServer(ctx context.Context, session *mcp.ClientSession, tools []*mcp.Tool) {
-	server := mcp.NewServer(&mcp.Implementation{
-		Name:    "konnect-mcp-stdio",
-		Version: "1.0.0",
-	}, nil)
+func runServer(_ context.Context, session *client.Client, tools []mcp.Tool) {
+	srv := server.NewMCPServer("konnect-mcp-stdio", "1.0.0")
 
 	for _, tool := range tools {
 		log.Info().
 			Str("tool_name", tool.Name).
 			Msg("added tool")
 
-		server.AddTool(tool, func(ctx context.Context, ctr *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		srv.AddTool(tool, func(ctx context.Context, ctr mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			log.Info().
 				Str("tool_name", ctr.Params.Name).
 				Any("arguments", ctr.Params.Arguments).
 				Any("meta", ctr.Params.Meta).
 				Msg("tool called")
-			return session.CallTool(ctx, &mcp.CallToolParams{
-				Name:      ctr.Params.Name,
-				Arguments: ctr.Params.Arguments,
-				Meta:      ctr.Params.Meta,
-			})
+			return session.CallTool(ctx, ctr)
 		})
 	}
 
-	if err := server.Run(ctx, &mcp.StdioTransport{}); err != nil {
+	if err := server.ServeStdio(srv); err != nil {
 		log.Fatal().Err(err).Msg("unable run stdio server")
 	}
 }

@@ -1,0 +1,72 @@
+{
+  "manifest_version": "0.2",
+  "name": "konnect-mcp",
+  "display_name": "Kong Konnect MCP",
+  "version": "0.0.1",
+  "description": "MCP Extention for Kong Konnect",
+  "author": {
+    "name": "Akilan Elango",
+    "email": "akilan.elango@konghq.com"
+  },
+  "documentation": "https://developer.konghq.com/",
+  "support": "https://support.konghq.com/support/s/",
+  "icon": "./assets/kong.png",
+  "server": {
+    "type": "binary",
+    "entry_point": "bin/konnect-mcp-stdio",
+    "mcp_config": {
+      "command": "${__dirname}/bin/konnect-mcp-stdio",
+      "args": [
+        "-region",
+        "${user_config.konnect_region}",
+        "-tld",
+        "${user_config.konnect_tld}",
+        "-local",
+        "${user_config.__local}"
+      ],
+      "env": {
+        "KONNECT_MCP_TOKEN": "${user_config.konnect_pat}"
+      }
+    }
+  },
+  "user_config": {
+    "konnect_pat": {
+      "type": "string",
+      "title": "Kong Konnect PAT Token",
+      "description": "Kong Konnect PAT Token to authorize all the Konnect Tool call.",
+      "required": true,
+      "sensitive": true
+    },
+    "konnect_region": {
+      "type": "string",
+      "title": "Konnect Region",
+      "description": "Kong Konnect Region to interact with.",
+      "required": false,
+      "sensitive": false,
+      "default": "us"
+    },
+    "konnect_tld": {
+      "type": "string",
+      "title": "Konnect Top Level Domain",
+      "description": "Kong Konnect Top Level Domain",
+      "required": false,
+      "sensitive": false,
+      "default": "com"
+    },
+    "__local": {
+      "type": "boolean",
+      "title": "Local Development",
+      "description": "Internal Flag",
+      "required": false,
+      "sensitive": false,
+      "default": false
+    }
+  },
+  "keywords": [
+    "kong",
+    "konnect",
+    "mcp",
+    "api"
+  ],
+  "license": "MIT"
+}
